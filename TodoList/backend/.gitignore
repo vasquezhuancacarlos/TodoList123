@@ -1,4 +1,14 @@
+# Dependencias
 node_modules/
+
+# Variables de entorno (NUNCA subir al repo)
+.env
+
+# Certificados SSL (generados localmente)
+certs/server.key
+certs/server.crt
+certs/*.pem
+
+# Archivos subidos por usuarios
 uploads/*
 !uploads/.gitkeep
-.env

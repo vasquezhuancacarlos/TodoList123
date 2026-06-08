@@ -1,5 +1,6 @@
-const express = require('express');
-const router  = express.Router();
+const express      = require('express');
+const router       = express.Router();
+const { verifyToken } = require('../middleware/auth.middleware');
 
 const {
     getTasks,
@@ -10,22 +11,25 @@ const {
     deleteTask
 } = require('../controllers/tasks.controller');
 
-// GET/api/tasks → lista paginada
-router.get('/',getTasks);
+// Todas las rutas de tareas requieren autenticación
+router.use(verifyToken);
 
-// GET/api/tasks/:id → tarea por ID
-router.get('/:id',getTaskById);
+// GET    /api/tasks           → lista paginada
+router.get('/',           getTasks);
 
-// POST/api/tasks → crear tarea
-router.post('/',createTask);
+// GET    /api/tasks/:id       → tarea por ID
+router.get('/:id',        getTaskById);
 
-// PUT/api/tasks/:id → actualizar tarea completa
-router.put('/:id',updateTask);
+// POST   /api/tasks           → crear tarea
+router.post('/',          createTask);
 
-// PATCH  /api/tasks/:id/toggle → alternar completed (sin body)
-router.patch('/:id/toggle',toggleTask);
+// PUT    /api/tasks/:id       → actualizar tarea completa
+router.put('/:id',        updateTask);
 
-// DELETE /api/tasks/:id → eliminar tarea
-router.delete('/:id',deleteTask);
+// PATCH  /api/tasks/:id/toggle → alternar completed
+router.patch('/:id/toggle', toggleTask);
+
+// DELETE /api/tasks/:id       → eliminar tarea
+router.delete('/:id',     deleteTask);
 
 module.exports = router;

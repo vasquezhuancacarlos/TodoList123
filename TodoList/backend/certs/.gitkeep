@@ -1,0 +1,3 @@
+# Este directorio contiene los certificados SSL.
+# Los archivos .pem / .key / .crt NO deben subirse al repositorio.
+# Ver README.md → sección "Generar certificados" para crearlos.
