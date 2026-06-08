@@ -142,6 +142,7 @@ npm run gen-certs
 ```
 
 Esto genera `backend/certs/key.pem` y `backend/certs/cert.pem` (auto-firmados, válidos 365 días).
+lo que tienes renombrar de server.key por key.pem y server.crt por cert.pem por que si no no podras ejecutarlo bien o como es debido
 
 **Alternativa manual con OpenSSL:**
 
