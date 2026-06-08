@@ -1,29 +1,99 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-//Configuración base
+// Config base
 const API = "/api";
 
-//Cache simple en memoria
-const cache = new Map();
-const CACHE_TTL = 30_000; // 30 segundos
+// Token helpers
+const getToken  = ()        => localStorage.getItem("token");
+const setToken  = (t)       => localStorage.setItem("token", t);
+const clearToken = ()       => localStorage.removeItem("token");
 
+/** Cabeceras con JWT para cada fetch protegido */
+function authHeaders(extra = {}) {
+  return { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}`, ...extra };
+}
+
+// Cache simple en memoria
+const cache = new Map();
+const CACHE_TTL = 30_000;
 function cacheGet(key) {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.ts > CACHE_TTL) { cache.delete(key); return null; }
-  return entry.data;
+  const e = cache.get(key);
+  if (!e) return null;
+  if (Date.now() - e.ts > CACHE_TTL) { cache.delete(key); return null; }
+  return e.data;
 }
 function cacheSet(key, data) { cache.set(key, { data, ts: Date.now() }); }
 function cacheInvalidate(prefix) {
-  for (const k of cache.keys()) { if (k.startsWith(prefix)) cache.delete(k); }
+  for (const k of cache.keys()) if (k.startsWith(prefix)) cache.delete(k);
 }
 
-// Hook useTasks
-function useTasks() {
-  const [tasks, setTasks]         = useState([]);
+// Hook: useAuth
+function useAuth() {
+  const [user,    setUser]    = useState(null);
+  const [loading, setLoading] = useState(true);   // verificando token al inicio
+  const [error,   setError]   = useState("");
+
+  // Al montar: verificar si ya hay token válido
+  useEffect(() => {
+    const token = getToken();
+    if (!token) { setLoading(false); return; }
+
+    fetch(`${API}/auth/me`, { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => setUser(data.usuario))
+      .catch(() => clearToken())
+      .finally(() => setLoading(false));
+  }, []);
+
+  const register = async (name, email, password) => {
+    setError("");
+    try {
+      const r    = await fetch(`${API}/auth/register`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ name, email, password })
+      });
+      const data = await r.json();
+      if (!r.ok) return setError(data.mensaje || "Error al registrar");
+      setToken(data.token);
+      setUser(data.usuario);
+    } catch {
+      setError("Error de red");
+    }
+  };
+
+  const login = async (email, password) => {
+    setError("");
+    try {
+      const r    = await fetch(`${API}/auth/login`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ email, password })
+      });
+      const data = await r.json();
+      if (!r.ok) return setError(data.mensaje || "Credenciales inválidas");
+      setToken(data.token);
+      setUser(data.usuario);
+    } catch {
+      setError("Error de red");
+    }
+  };
+
+  const logout = () => {
+    clearToken();
+    cacheInvalidate("tasks:");
+    setUser(null);
+  };
+
+  return { user, loading, error, register, login, logout };
+}
+
+// Hook: useTasks  ,ahora envía JWT
+function useTasks(onUnauthorized) {
+  const [tasks,      setTasks]      = useState([]);
   const [pagination, setPagination] = useState({ currentPage: 1, totalPages: 1, total: 0 });
-  const [loading, setLoading]     = useState(false);
-  const [filter, setFilter]       = useState("all"); // all | pending | done
+  const [loading,    setLoading]    = useState(false);
+  const [filter,     setFilter]     = useState("all");
 
   const fetchTasks = useCallback(async (page = 1) => {
     const completedParam =
@@ -32,98 +102,84 @@ function useTasks() {
     const key = `tasks:${page}:${filter}`;
 
     const cached = cacheGet(key);
-    if (cached) {
-      setTasks(cached.data);
-      setPagination(cached.pagination);
-      return;
-    }
+    if (cached) { setTasks(cached.data); setPagination(cached.pagination); return; }
 
     setLoading(true);
     try {
-      const r = await fetch(`${API}/tasks?page=${page}&limit=5${completedParam}`);
+      const r = await fetch(`${API}/tasks?page=${page}&limit=5${completedParam}`, {
+        headers: authHeaders()
+      });
+      if (r.status === 401) { onUnauthorized?.(); return; }
       const json = await r.json();
       setTasks(json.data);
       setPagination({ ...json.pagination });
       cacheSet(key, { data: json.data, pagination: json.pagination });
-    } catch { /* network error */ }
+    } catch {}
     finally { setLoading(false); }
-  }, [filter]);
+  }, [filter, onUnauthorized]);
 
   useEffect(() => { fetchTasks(1); }, [fetchTasks]);
 
-  const goToPage = (p) => fetchTasks(p);
+  const goToPage   = (p) => fetchTasks(p);
 
   const toggleTask = async (id) => {
-    try {
-      await fetch(`${API}/tasks/${id}/toggle`, { method: "PATCH" });
-      cacheInvalidate("tasks:");
-      fetchTasks(pagination.currentPage);
-    } catch {}
+    await fetch(`${API}/tasks/${id}/toggle`, { method: "PATCH", headers: authHeaders() });
+    cacheInvalidate("tasks:"); fetchTasks(pagination.currentPage);
   };
 
   const deleteTask = async (id) => {
-    try {
-      await fetch(`${API}/tasks/${id}`, { method: "DELETE" });
-      cacheInvalidate("tasks:");
-      fetchTasks(pagination.currentPage);
-    } catch {}
+    await fetch(`${API}/tasks/${id}`, { method: "DELETE", headers: authHeaders() });
+    cacheInvalidate("tasks:"); fetchTasks(pagination.currentPage);
   };
 
   const createTask = async (title) => {
-    try {
-      await fetch(`${API}/tasks`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title })
-      });
-      cacheInvalidate("tasks:");
-      fetchTasks(1);
-    } catch {}
+    await fetch(`${API}/tasks`, {
+      method:  "POST",
+      headers: authHeaders(),
+      body:    JSON.stringify({ title })
+    });
+    cacheInvalidate("tasks:"); fetchTasks(1);
   };
 
   return { tasks, pagination, loading, filter, setFilter, goToPage, toggleTask, deleteTask, createTask };
 }
 
-//Hook useDrive
-function useDrive() {
-  const [files, setFiles]       = useState([]);
+// Hook: useDrive  (ahora envía JWT, excepto la descarga que es una URL directa)
+function useDrive(onUnauthorized) {
+  const [files,        setFiles]       = useState([]);
   const [driveLoading, setDriveLoading] = useState(false);
-  const [uploadState, setUploadState]   = useState(null);
-  // uploadState: null | { status:'conflict', existingFile, tempName, pendingFile }
+  const [uploadState,  setUploadState]  = useState(null);
 
   const fetchFiles = useCallback(async () => {
     setDriveLoading(true);
     try {
-      const r    = await fetch(`${API}/drive`);
+      const r    = await fetch(`${API}/drive`, { headers: authHeaders() });
+      if (r.status === 401) { onUnauthorized?.(); return; }
       const json = await r.json();
       setFiles(json.data || []);
     } catch {}
     finally { setDriveLoading(false); }
-  }, []);
+  }, [onUnauthorized]);
 
   useEffect(() => { fetchFiles(); }, [fetchFiles]);
 
   const uploadFile = async (file, replace = false, tempName = null) => {
     const form = new FormData();
-    if (replace && tempName) {
-      // Re-enviar indicando reemplazo confirmado — necesitamos el mismo binario
-      form.append("file", file);
-      form.append("replace", "true");
-    } else {
-      form.append("file", file);
-    }
+    form.append("file", file);
+    if (replace && tempName) form.append("replace", "true");
 
     setDriveLoading(true);
     try {
-      const r    = await fetch(`${API}/drive/upload`, { method: "POST", body: form });
+      const r    = await fetch(`${API}/drive/upload`, {
+        method:  "POST",
+        headers: { Authorization: `Bearer ${getToken()}` },  // sin Content-Type para multipart
+        body:    form
+      });
       const json = await r.json();
-
       if (r.status === 409) {
-        // Conflicto: archivo duplicado
         setUploadState({ status: "conflict", existingFile: json.existingFile, tempName: json.tempName, pendingFile: file });
       } else {
-        setUploadState(null);
-        fetchFiles();
+        setUploadState(null); fetchFiles();
       }
     } catch {}
     finally { setDriveLoading(false); }
@@ -138,9 +194,9 @@ function useDrive() {
     if (!uploadState?.tempName) return;
     try {
       await fetch(`${API}/drive/cancel-replace`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tempName: uploadState.tempName })
+        method:  "POST",
+        headers: authHeaders(),
+        body:    JSON.stringify({ tempName: uploadState.tempName })
       });
     } catch {}
     setUploadState(null);
@@ -154,10 +210,8 @@ function useDrive() {
   };
 
   const deleteFile = async (id) => {
-    try {
-      await fetch(`${API}/drive/${id}`, { method: "DELETE" });
-      fetchFiles();
-    } catch {}
+    await fetch(`${API}/drive/${id}`, { method: "DELETE", headers: authHeaders() });
+    fetchFiles();
   };
 
   return { files, driveLoading, uploadState, uploadFile, confirmReplace, cancelReplace, downloadFile, deleteFile };
@@ -169,17 +223,15 @@ function formatBytes(b) {
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / (1024 * 1024)).toFixed(1)} MB`;
 }
-
 function timeAgo(dateStr) {
   const diff = Date.now() - new Date(dateStr);
-  const m = Math.floor(diff / 60000);
+  const m    = Math.floor(diff / 60000);
   if (m < 1)  return "justo ahora";
   if (m < 60) return `hace ${m}m`;
   const h = Math.floor(m / 60);
   if (h < 24) return `hace ${h}h`;
   return `hace ${Math.floor(h / 24)}d`;
 }
-
 function Badge({ completed }) {
   return (
     <span style={{
@@ -193,11 +245,122 @@ function Badge({ completed }) {
   );
 }
 
-//Modal de conflicto
+// AuthScreen: Login / Registro
+function AuthScreen({ onLogin, onRegister, error }) {
+  const [mode,     setMode]     = useState("login");  // "login" | "register"
+  const [name,     setName]     = useState("");
+  const [email,    setEmail]    = useState("");
+  const [password, setPassword] = useState("");
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (mode === "login") onLogin(email, password);
+    else                  onRegister(name, email, password);
+  };
+
+  const inputStyle = {
+    width: "100%", padding: "11px 14px", borderRadius: 10,
+    border: "1px solid #3b3b5c", background: "#2a2a3e",
+    color: "#e2e2f0", fontSize: 14, outline: "none",
+    boxSizing: "border-box"
+  };
+  const labelStyle = { display: "block", fontSize: 12, color: "#a0a0c0", marginBottom: 6, fontWeight: 600 };
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#13131f",
+      display: "flex", alignItems: "center", justifyContent: "center"
+    }}>
+      <div style={{
+        background: "#1e1e2e", borderRadius: 20,
+        border: "1px solid #2a2a3e",
+        padding: "40px 36px", width: "100%", maxWidth: 420,
+        boxShadow: "0 24px 60px rgba(0,0,0,.5)"
+      }}>
+        {/* Logo */}
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <span style={{ fontSize: 36 }}>🗂️</span>
+          <h1 style={{
+            margin: "8px 0 0",
+            fontFamily: "'DM Serif Display', serif",
+            fontSize: 24, color: "#e2e2f0", fontWeight: 400
+          }}>
+            TodoList <span style={{ color: "#7c7cff" }}>+</span> Drive
+          </h1>
+        </div>
+
+        {/* Tabs Login / Registro */}
+        <div style={{ display: "flex", background: "#2a2a3e", borderRadius: 10, padding: 4, marginBottom: 28 }}>
+          {["login", "register"].map(m => (
+            <button key={m} onClick={() => setMode(m)} style={{
+              flex: 1, padding: "8px 0", borderRadius: 8, border: "none",
+              background: mode === m ? "#7c7cff" : "transparent",
+              color:      mode === m ? "#fff"    : "#6b6b8a",
+              fontWeight: 600, fontSize: 14, cursor: "pointer",
+              transition: "all .15s", fontFamily: "'DM Sans', sans-serif"
+            }}>
+              {m === "login" ? "Iniciar sesión" : "Registrarse"}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {mode === "register" && (
+            <div>
+              <label style={labelStyle}>Nombre</label>
+              <input
+                style={inputStyle} type="text" placeholder="Tu nombre"
+                value={name} onChange={e => setName(e.target.value)} required
+              />
+            </div>
+          )}
+
+          <div>
+            <label style={labelStyle}>Email</label>
+            <input
+              style={inputStyle} type="email" placeholder="tu@email.com"
+              value={email} onChange={e => setEmail(e.target.value)} required
+            />
+          </div>
+
+          <div>
+            <label style={labelStyle}>Contraseña</label>
+            <input
+              style={inputStyle} type="password"
+              placeholder={mode === "register" ? "Mínimo 6 caracteres" : "Tu contraseña"}
+              value={password} onChange={e => setPassword(e.target.value)} required
+            />
+          </div>
+
+          {error && (
+            <div style={{
+              background: "#ff4d4d18", border: "1px solid #ff4d4d44",
+              borderRadius: 8, padding: "10px 14px",
+              color: "#ff7070", fontSize: 13
+            }}>
+              {error}
+            </div>
+          )}
+
+          <button type="submit" style={{
+            padding: "12px 0", borderRadius: 10, border: "none",
+            background: "#7c7cff", color: "#fff",
+            fontWeight: 700, fontSize: 15, cursor: "pointer",
+            marginTop: 4, fontFamily: "'DM Sans', sans-serif",
+            transition: "opacity .15s"
+          }}>
+            {mode === "login" ? "Entrar" : "Crear cuenta"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ConflictModal
 function ConflictModal({ uploadState, onConfirm, onCancel }) {
   if (!uploadState || uploadState.status !== "conflict") return null;
   const { existingFile } = uploadState;
-
   return (
     <div style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,.55)",
@@ -224,26 +387,22 @@ function ConflictModal({ uploadState, onConfirm, onCancel }) {
           <button onClick={onConfirm} style={{
             flex: 1, padding: "10px 0", borderRadius: 10, border: "none",
             background: "#f5c542", color: "#1a1a2e", fontWeight: 700, cursor: "pointer", fontSize: 14
-          }}>
-            Reemplazar
-          </button>
+          }}>Reemplazar</button>
           <button onClick={onCancel} style={{
             flex: 1, padding: "10px 0", borderRadius: 10, border: "1px solid #3b3b5c",
             background: "transparent", color: "#a0a0c0", fontWeight: 600, cursor: "pointer", fontSize: 14
-          }}>
-            Cancelar
-          </button>
+          }}>Cancelar</button>
         </div>
       </div>
     </div>
   );
 }
 
-//Sección: Task List
-function TaskSection() {
-  const { tasks, pagination, loading, filter, setFilter, goToPage, toggleTask, deleteTask, createTask } = useTasks();
+// TaskSection (recibe onUnauthorized)
+function TaskSection({ onUnauthorized }) {
+  const { tasks, pagination, loading, filter, setFilter, goToPage, toggleTask, deleteTask, createTask } = useTasks(onUnauthorized);
   const [newTitle, setNewTitle] = useState("");
-  const [hovered, setHovered]  = useState(null);
+  const [hovered,  setHovered]  = useState(null);
 
   const handleCreate = (e) => {
     e.preventDefault();
@@ -255,15 +414,12 @@ function TaskSection() {
   return (
     <section>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-        <h2 style={{ margin: 0, fontFamily: "'DM Serif Display', serif", fontSize: 26, color: "#e2e2f0" }}>
-          Tareas
-        </h2>
+        <h2 style={{ margin: 0, fontFamily: "'DM Serif Display', serif", fontSize: 26, color: "#e2e2f0" }}>Tareas</h2>
         <span style={{ fontSize: 12, color: "#6b6b8a", background: "#2a2a3e", padding: "4px 12px", borderRadius: 20 }}>
           {pagination.total} total
         </span>
       </div>
 
-      {/* Filtros */}
       <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
         {["all", "pending", "done"].map(f => (
           <button key={f} onClick={() => setFilter(f)} style={{
@@ -278,11 +434,9 @@ function TaskSection() {
         ))}
       </div>
 
-      {/* Crear tarea */}
       <form onSubmit={handleCreate} style={{ display: "flex", gap: 10, marginBottom: 24 }}>
         <input
-          value={newTitle}
-          onChange={e => setNewTitle(e.target.value)}
+          value={newTitle} onChange={e => setNewTitle(e.target.value)}
           placeholder="Nueva tarea..."
           style={{
             flex: 1, padding: "10px 16px", borderRadius: 10,
@@ -293,18 +447,13 @@ function TaskSection() {
         <button type="submit" style={{
           padding: "10px 20px", borderRadius: 10, border: "none",
           background: "#7c7cff", color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 14
-        }}>
-          + Añadir
-        </button>
+        }}>+ Añadir</button>
       </form>
 
-      {/* Lista */}
       {loading ? (
         <div style={{ textAlign: "center", color: "#6b6b8a", padding: 40 }}>Cargando...</div>
       ) : tasks.length === 0 ? (
-        <div style={{ textAlign: "center", color: "#6b6b8a", padding: 40, fontSize: 14 }}>
-          Sin tareas en este filtro
-        </div>
+        <div style={{ textAlign: "center", color: "#6b6b8a", padding: 40, fontSize: 14 }}>Sin tareas en este filtro</div>
       ) : (
         <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
           {tasks.map(task => (
@@ -317,9 +466,7 @@ function TaskSection() {
                 padding: "14px 16px", display: "flex", alignItems: "center", gap: 12,
                 transition: "border-color .15s"
               }}>
-
-              {/* Toggle checkbox */}
-              <button onClick={() => toggleTask(task._id)} title="PATCH toggle" style={{
+              <button onClick={() => toggleTask(task._id)} style={{
                 width: 24, height: 24, borderRadius: 6, border: "2px solid",
                 borderColor: task.completed ? "#34d399" : "#4b4b6b",
                 background: task.completed ? "#34d39922" : "transparent",
@@ -328,8 +475,6 @@ function TaskSection() {
               }}>
                 {task.completed ? "✓" : ""}
               </button>
-
-              {/* Contenido */}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <span style={{
                   fontSize: 15, color: task.completed ? "#6b6b8a" : "#e2e2f0",
@@ -340,47 +485,29 @@ function TaskSection() {
                 </span>
                 <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 4 }}>
                   <Badge completed={task.completed} />
-                  <a
-                    href={`${API}/tasks/${task._id}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    title="Ver en API"
-                    style={{ fontSize: 11, color: "#7c7cff", textDecoration: "none", opacity: .7 }}
-                  >
-                    🔗 /api/tasks/{task._id.slice(-6)}
-                  </a>
                   <span style={{ fontSize: 11, color: "#6b6b8a" }}>{timeAgo(task.createdAt)}</span>
                 </div>
               </div>
-
-              {/* Eliminar */}
               {hovered === task._id && (
                 <button onClick={() => deleteTask(task._id)} style={{
                   background: "#ff4d4d22", border: "1px solid #ff4d4d44",
                   color: "#ff7070", borderRadius: 8, padding: "4px 10px",
                   cursor: "pointer", fontSize: 12, fontWeight: 600
-                }}>
-                  Eliminar
-                </button>
+                }}>Eliminar</button>
               )}
             </li>
           ))}
         </ul>
       )}
 
-      {/* Paginación */}
       {pagination.totalPages > 1 && (
         <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 8, marginTop: 24 }}>
-          <button
-            onClick={() => goToPage(pagination.currentPage - 1)}
-            disabled={!pagination.hasPrevPage}
+          <button onClick={() => goToPage(pagination.currentPage - 1)} disabled={!pagination.hasPrevPage}
             style={{
               padding: "6px 14px", borderRadius: 8, border: "1px solid #3b3b5c",
               background: "transparent", color: pagination.hasPrevPage ? "#a0a0ff" : "#3b3b5c",
               cursor: pagination.hasPrevPage ? "pointer" : "default", fontSize: 13
-            }}>
-            ← Anterior
-          </button>
+            }}>← Anterior</button>
           {Array.from({ length: pagination.totalPages }, (_, i) => i + 1).map(p => (
             <button key={p} onClick={() => goToPage(p)} style={{
               width: 34, height: 34, borderRadius: 8, border: "1px solid",
@@ -388,61 +515,49 @@ function TaskSection() {
               background: p === pagination.currentPage ? "#7c7cff22" : "transparent",
               color: p === pagination.currentPage ? "#a0a0ff" : "#6b6b8a",
               cursor: "pointer", fontSize: 13, fontWeight: p === pagination.currentPage ? 700 : 400
-            }}>
-              {p}
-            </button>
+            }}>{p}</button>
           ))}
-          <button
-            onClick={() => goToPage(pagination.currentPage + 1)}
-            disabled={!pagination.hasNextPage}
+          <button onClick={() => goToPage(pagination.currentPage + 1)} disabled={!pagination.hasNextPage}
             style={{
               padding: "6px 14px", borderRadius: 8, border: "1px solid #3b3b5c",
               background: "transparent", color: pagination.hasNextPage ? "#a0a0ff" : "#3b3b5c",
               cursor: pagination.hasNextPage ? "pointer" : "default", fontSize: 13
-            }}>
-            Siguiente →
-          </button>
+            }}>Siguiente →</button>
         </div>
       )}
     </section>
   );
 }
 
-//Sección: Drive
-function DriveSection() {
-  const { files, driveLoading, uploadState, uploadFile, confirmReplace, cancelReplace, downloadFile, deleteFile } = useDrive();
-  const inputRef    = useRef(null);
+// DriveSection (recibe onUnauthorized)
+
+function DriveSection({ onUnauthorized }) {
+  const { files, driveLoading, uploadState, uploadFile, confirmReplace, cancelReplace, downloadFile, deleteFile } = useDrive(onUnauthorized);
+  const inputRef           = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [hovered, setHovered]   = useState(null);
 
-  const handleFiles = (fileList) => {
-    const file = fileList[0];
-    if (file) uploadFile(file);
-  };
-
+  const handleFiles = (fileList) => { const f = fileList[0]; if (f) uploadFile(f); };
   const iconFor = (mime) => {
-    if (mime?.startsWith("image/"))       return "🖼️";
-    if (mime?.includes("pdf"))            return "📄";
+    if (mime?.startsWith("image/"))  return "🖼️";
+    if (mime?.includes("pdf"))       return "📄";
     if (mime?.includes("zip") || mime?.includes("rar")) return "🗜️";
     if (mime?.includes("spreadsheet") || mime?.includes("excel")) return "📊";
-    if (mime?.includes("word"))           return "📝";
-    if (mime?.includes("video"))          return "🎬";
-    if (mime?.includes("audio"))          return "🎵";
+    if (mime?.includes("word"))  return "📝";
+    if (mime?.includes("video")) return "🎬";
+    if (mime?.includes("audio")) return "🎵";
     return "📁";
   };
 
   return (
     <section>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-        <h2 style={{ margin: 0, fontFamily: "'DM Serif Display', serif", fontSize: 26, color: "#e2e2f0" }}>
-          Drive
-        </h2>
+        <h2 style={{ margin: 0, fontFamily: "'DM Serif Display', serif", fontSize: 26, color: "#e2e2f0" }}>Drive</h2>
         <span style={{ fontSize: 12, color: "#6b6b8a", background: "#2a2a3e", padding: "4px 12px", borderRadius: 20 }}>
           {files.length} archivo{files.length !== 1 ? "s" : ""}
         </span>
       </div>
 
-      {/* Drop zone */}
       <div
         onDragOver={e => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
@@ -463,13 +578,10 @@ function DriveSection() {
         <input ref={inputRef} type="file" hidden onChange={e => handleFiles(e.target.files)} />
       </div>
 
-      {/* Lista de archivos */}
       {driveLoading && !uploadState ? (
         <div style={{ textAlign: "center", color: "#6b6b8a", padding: 30 }}>Cargando...</div>
       ) : files.length === 0 ? (
-        <div style={{ textAlign: "center", color: "#6b6b8a", padding: 30, fontSize: 14 }}>
-          Sin archivos aún
-        </div>
+        <div style={{ textAlign: "center", color: "#6b6b8a", padding: 30, fontSize: 14 }}>Sin archivos aún</div>
       ) : (
         <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
           {files.map(f => (
@@ -482,16 +594,12 @@ function DriveSection() {
                 padding: "12px 16px", display: "flex", alignItems: "center", gap: 12,
                 transition: "border-color .15s"
               }}>
-
               <span style={{ fontSize: 24, flexShrink: 0 }}>{iconFor(f.mimeType)}</span>
-
               <div style={{ flex: 1, minWidth: 0 }}>
                 <span style={{
                   fontSize: 14, color: "#e2e2f0", display: "block",
                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"
-                }}>
-                  {f.originalName}
-                </span>
+                }}>{f.originalName}</span>
                 <div style={{ display: "flex", gap: 12, marginTop: 3 }}>
                   <span style={{ fontSize: 11, color: "#6b6b8a" }}>{formatBytes(f.size)}</span>
                   <span style={{ fontSize: 11, color: "#6b6b8a" }}>{f.mimeType}</span>
@@ -501,53 +609,60 @@ function DriveSection() {
                   )}
                 </div>
               </div>
-
-              {/* Acciones */}
               <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-                <button
-                  onClick={() => downloadFile(f._id, f.originalName)}
-                  title="Descargar"
-                  style={{
-                    padding: "5px 12px", borderRadius: 8, border: "1px solid #3b5c3b",
-                    background: "#34d39911", color: "#34d399",
-                    cursor: "pointer", fontSize: 12, fontWeight: 600
-                  }}>
-                  ↓ Bajar
-                </button>
+                <button onClick={() => downloadFile(f._id, f.originalName)} title="Descargar" style={{
+                  padding: "5px 12px", borderRadius: 8, border: "1px solid #3b5c3b",
+                  background: "#34d39911", color: "#34d399",
+                  cursor: "pointer", fontSize: 12, fontWeight: 600
+                }}>↓ Bajar</button>
                 {hovered === f._id && (
-                  <button
-                    onClick={() => deleteFile(f._id)}
-                    style={{
-                      padding: "5px 12px", borderRadius: 8, border: "1px solid #ff4d4d44",
-                      background: "#ff4d4d11", color: "#ff7070",
-                      cursor: "pointer", fontSize: 12, fontWeight: 600
-                    }}>
-                    Eliminar
-                  </button>
+                  <button onClick={() => deleteFile(f._id)} style={{
+                    padding: "5px 12px", borderRadius: 8, border: "1px solid #ff4d4d44",
+                    background: "#ff4d4d11", color: "#ff7070",
+                    cursor: "pointer", fontSize: 12, fontWeight: 600
+                  }}>Eliminar</button>
                 )}
               </div>
             </li>
           ))}
         </ul>
       )}
-
-      {/* Modal conflicto */}
-      <ConflictModal
-        uploadState={uploadState}
-        onConfirm={confirmReplace}
-        onCancel={cancelReplace}
-      />
+      <ConflictModal uploadState={uploadState} onConfirm={confirmReplace} onCancel={cancelReplace} />
     </section>
   );
 }
 
-//App principal
+// App principal
 export default function App() {
+  const { user, loading, error, register, login, logout } = useAuth();
   const [tab, setTab] = useState("tasks");
 
+  // Pantalla de carga mientras verifica el token
+  if (loading) return (
+    <div style={{
+      minHeight: "100vh", background: "#13131f",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      color: "#6b6b8a", fontFamily: "'DM Sans', sans-serif", fontSize: 15
+    }}>
+      Verificando sesión...
+    </div>
+  );
+
+  // Sin sesión → AuthScreen
+  if (!user) return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap');
+        *, *::before, *::after { box-sizing: border-box; }
+        body { margin: 0; background: #13131f; font-family: 'DM Sans', sans-serif; color: #e2e2f0; }
+      `}</style>
+      <AuthScreen onLogin={login} onRegister={register} error={error} />
+    </>
+  );
+
+  // Con sesión → App normal
   return (
     <>
-      {/* Google Fonts */}
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap');
         *, *::before, *::after { box-sizing: border-box; }
@@ -558,7 +673,6 @@ export default function App() {
       `}</style>
 
       <div style={{ minHeight: "100vh", background: "#13131f" }}>
-        {/* Header */}
         <header style={{
           background: "#1e1e2e", borderBottom: "1px solid #2a2a3e",
           padding: "16px 32px", display: "flex", alignItems: "center", justifyContent: "space-between"
@@ -572,28 +686,47 @@ export default function App() {
               TodoList <span style={{ color: "#7c7cff" }}>+</span> Drive
             </h1>
           </div>
-          <div style={{ display: "flex", gap: 4 }}>
-            {[
-              { id: "tasks", label: "📋 Tareas" },
-              { id: "drive", label: "☁️ Drive"  }
-            ].map(({ id, label }) => (
-              <button key={id} onClick={() => setTab(id)} style={{
-                padding: "8px 20px", borderRadius: 10, border: "1px solid",
-                borderColor: tab === id ? "#7c7cff" : "#3b3b5c",
-                background: tab === id ? "#7c7cff22" : "transparent",
-                color: tab === id ? "#a0a0ff" : "#6b6b8a",
-                cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
-                fontWeight: 600, fontSize: 14, transition: "all .15s"
+
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            {/* Tabs */}
+            <div style={{ display: "flex", gap: 4 }}>
+              {[{ id: "tasks", label: "📋 Tareas" }, { id: "drive", label: "☁️ Drive" }].map(({ id, label }) => (
+                <button key={id} onClick={() => setTab(id)} style={{
+                  padding: "8px 20px", borderRadius: 10, border: "1px solid",
+                  borderColor: tab === id ? "#7c7cff" : "#3b3b5c",
+                  background: tab === id ? "#7c7cff22" : "transparent",
+                  color: tab === id ? "#a0a0ff" : "#6b6b8a",
+                  cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+                  fontWeight: 600, fontSize: 14, transition: "all .15s"
+                }}>{label}</button>
+              ))}
+            </div>
+
+            {/* Usuario + Logout */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, borderLeft: "1px solid #2a2a3e", paddingLeft: 16 }}>
+              <div style={{
+                width: 32, height: 32, borderRadius: "50%",
+                background: "#7c7cff33", border: "2px solid #7c7cff55",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 14, color: "#a0a0ff", fontWeight: 700
               }}>
-                {label}
-              </button>
-            ))}
+                {user.name?.[0]?.toUpperCase() ?? "U"}
+              </div>
+              <span style={{ fontSize: 13, color: "#a0a0c0" }}>{user.name}</span>
+              <button onClick={logout} style={{
+                padding: "5px 12px", borderRadius: 8,
+                border: "1px solid #3b3b5c", background: "transparent",
+                color: "#6b6b8a", cursor: "pointer", fontSize: 12, fontWeight: 600
+              }}>Salir</button>
+            </div>
           </div>
         </header>
 
-        {/* Contenido */}
         <main style={{ maxWidth: 720, margin: "0 auto", padding: "36px 24px" }}>
-          {tab === "tasks" ? <TaskSection /> : <DriveSection />}
+          {tab === "tasks"
+            ? <TaskSection  onUnauthorized={logout} />
+            : <DriveSection onUnauthorized={logout} />
+          }
         </main>
       </div>
     </>
