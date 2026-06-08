@@ -1,0 +1,49 @@
+version: '3.9'
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: todolist_mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+      - ./seed:/docker-entrypoint-initdb.d   # carga la BD semilla
+    environment:
+      MONGO_INITDB_DATABASE: todolist
+    networks:
+      - app_net
+
+  backend:
+    build: ./backend
+    container_name: todolist_backend
+    restart: unless-stopped
+    environment:
+      MONGO_URI: mongodb://mongo:27017/todolist
+      HTTPS_PORT: 3443
+      PORT: 3000
+      JWT_SECRET: ${JWT_SECRET:-dev_secret_cambia_en_produccion}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+    ports:
+      - "3000:3000"
+      - "3443:3443"
+    depends_on:
+      - mongo
+    networks:
+      - app_net
+
+  frontend:
+    build: ./frontend
+    container_name: todolist_frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      - app_net
+
+volumes:
+  mongo_data:
+
+networks:
+  app_net:
