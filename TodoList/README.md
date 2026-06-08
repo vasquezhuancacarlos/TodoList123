@@ -413,6 +413,9 @@ Creadas automáticamente por `seed/seed.js`:
 |--------|-------|------------|
 | Ana Demo | usuario1@demo.com | demo1234 |
 | Carlos Demo | usuario2@demo.com | demo1234 |
+ 
+si no da esos usuarios predefinidos registre otros y asi podra acceder con 
+normalidad.
 
 > ⚠️ Usa estas credenciales **solo en entornos de desarrollo y prueba**. Nunca en producción.
 
